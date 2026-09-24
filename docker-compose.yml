@@ -1,0 +1,49 @@
+services:
+  ecotracker-limiter:
+    image: python:3.13-alpine
+    container_name: ecotracker-limiter
+    network_mode: host
+    restart: unless-stopped
+    command: ["python3", "-u", "/app/ecotracker_limiter.py"]
+    volumes:
+      - ./ecotracker_limiter.py:/app/ecotracker_limiter.py:ro
+    environment:
+      # Data sources (set these in .env)
+      ECOTRACKER_URL: "${ECOTRACKER_URL:?Set ECOTRACKER_URL in .env}"
+      INVERTER_URL: "${INVERTER_URL:?Set INVERTER_URL in .env}"
+      INVERTER_FIELD: "${INVERTER_FIELD:-apower}"
+      INVERTER_INVERT: "${INVERTER_INVERT:-true}"
+      ECOTRACKER_MAX_AGE_MS: "${ECOTRACKER_MAX_AGE_MS:-5000}"
+
+      # Local endpoint consumed by uni-meter
+      LISTEN_HOST: "127.0.0.1"
+      LISTEN_PORT: "18081"
+
+      # Output limits
+      MAX_OUTPUT_W: "${MAX_OUTPUT_W:-740}"
+      HARD_LIMIT_W: "${HARD_LIMIT_W:-790}"
+
+      # Controller tuning
+      KP_UP: "${KP_UP:-0.40}"
+      KP_DOWN: "${KP_DOWN:-0.70}"
+      MAX_RAISE_SIGNAL_W: "${MAX_RAISE_SIGNAL_W:-200}"
+      MAX_REDUCE_SIGNAL_W: "${MAX_REDUCE_SIGNAL_W:-800}"
+      SETTLE_S: "${SETTLE_S:-3.0}"
+      DEADBAND_W: "${DEADBAND_W:-15}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-1.0}"
+
+      # Failsafe
+      ENABLED: "${ENABLED:-true}"
+      STALE_S: "${STALE_S:-5}"
+      STALE_HARD_S: "${STALE_HARD_S:-15}"
+      SAFE_CONTROL_W: "${SAFE_CONTROL_W:--300}"
+
+  ecotracker-shelly:
+    image: sdeigm/uni-meter:1.5.0
+    container_name: ecotracker-shelly
+    network_mode: host
+    restart: unless-stopped
+    depends_on:
+      - ecotracker-limiter
+    volumes:
+      - ./uni-meter.conf:/etc/uni-meter.conf:ro
