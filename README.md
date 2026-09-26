@@ -7,7 +7,7 @@ Zähler bereit, der aus den lokalen Daten eines everHome EcoTracker gespeist
 wird. Ein vorgeschalteter Limiter nutzt zusätzlich einen Shelly am AC-Ausgang,
 um die abgegebene Leistung gedämpft zu regeln.
 
-Getesteter Stand: Limiter **2.1.1**, `sdeigm/uni-meter:1.5.0` und
+Getesteter Stand: Limiter **2.2.0**, `sdeigm/uni-meter:1.5.0` und
 ECO-WORTHY ECOVIS 2400.
 
 ## Datenfluss
