@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1.1"
+VERSION = "2.2.0"
 
 
 # --------------------------------------------------------------------------
@@ -53,8 +53,8 @@ def env_bool(name: str, default: bool) -> bool:
 
 class Config:
     # --- Datenquellen -----------------------------------------------------
-    ECOTRACKER_URL = env_str("ECOTRACKER_URL", "http://192.168.1.50:18080/v1/json")
-    INVERTER_URL = env_str("INVERTER_URL", "http://192.168.1.51/rpc/Switch.GetStatus?id=0")
+    ECOTRACKER_URL = env_str("ECOTRACKER_URL", "http://192.168.8.248:18080/v1/json")
+    INVERTER_URL = env_str("INVERTER_URL", "http://192.168.8.198/rpc/Switch.GetStatus?id=0")
     # Punkt-Pfad in der JSON-Antwort, z.B. "apower" (Gen2/3) oder "meters.0.power" (Gen1)
     INVERTER_FIELD = env_str("INVERTER_FIELD", "apower")
     INVERTER_INVERT = env_bool("INVERTER_INVERT", True)
@@ -82,6 +82,16 @@ class Config:
     MAX_RAISE_SIGNAL_W = env_float("MAX_RAISE_SIGNAL_W", 200.0)
     MAX_REDUCE_SIGNAL_W = env_float("MAX_REDUCE_SIGNAL_W", 800.0)
     SETTLE_S = env_float("SETTLE_S", 3.0)                # gemessene Totzeit der Strecke
+
+    # Bei kleiner Hauslast wird die normale, stark gedaempfte Korrektur vom
+    # ECOVIS teilweise ignoriert (z.B. 6,9 W Korrektur bei 69 W Hauslast).
+    # In diesem sicheren Leistungsbereich darf der Regler den Fehler deshalb
+    # direkt melden. Nach einem grossen Lastabwurf bleibt zunaechst weiterhin
+    # der gedaempfte Absenkzweig aktiv.
+    LOW_LOAD_MAX_W = env_float("LOW_LOAD_MAX_W", 150.0)
+    LOW_LOAD_MAX_INVERTER_W = env_float("LOW_LOAD_MAX_INVERTER_W", 200.0)
+    LOW_LOAD_DEADBAND_W = env_float("LOW_LOAD_DEADBAND_W", 3.0)
+    LOW_LOAD_KP = env_float("LOW_LOAD_KP", 1.0)
 
     # --- Glaettung --------------------------------------------------------
     GRID_EMA_ALPHA = env_float("GRID_EMA_ALPHA", 0.6)
@@ -344,7 +354,23 @@ class Controller:
         ticks = max(1.0, Config.SETTLE_S / max(0.1, Config.POLL_INTERVAL))
         error = clamp(house, 0.0, Config.MAX_OUTPUT_W) - inv_f
 
-        if abs(error) < Config.DEADBAND_W:
+        low_load = (
+            target <= Config.LOW_LOAD_MAX_W
+            and inv_f <= Config.LOW_LOAD_MAX_INVERTER_W
+        )
+
+        # Unterhalb LOW_LOAD_MAX_W wird genau der noch fehlende Betrag
+        # gemeldet. Das startet den ECOVIS auch bei kleinen Lasten, bei denen
+        # die normale Daempfung nur ein einstelliger und offenbar wirkungsloser
+        # Messwert waere. Der Zweig ist auf kleine Ziel- und Istleistungen
+        # begrenzt; ein grosser Lastabwurf wird weiterhin sanft abgefangen.
+        if low_load and abs(error) < Config.LOW_LOAD_DEADBAND_W:
+            control = 0.0
+            state = "hold_low"
+        elif low_load:
+            control = error * Config.LOW_LOAD_KP
+            state = "raise_low" if error > 0 else "reduce_low"
+        elif abs(error) < Config.DEADBAND_W:
             control = 0.0
             state = "hold"
         elif error > 0:
@@ -472,9 +498,9 @@ def main() -> int:
 
     print(
         "[info] Limiter {} | Ziel {:.0f} W | Notzweig ab {:.0f} W | KP_UP={:.2f} KP_DOWN={:.2f} "
-        "| Wartepause {:.1f}s | Begrenzung {}".format(
+        "| Niedriglast direkt bis {:.0f} W | Wartepause {:.1f}s | Begrenzung {}".format(
             VERSION, Config.MAX_OUTPUT_W, Config.HARD_LIMIT_W, Config.KP_UP,
-            Config.KP_DOWN, Config.SETTLE_S,
+            Config.KP_DOWN, Config.LOW_LOAD_MAX_W, Config.SETTLE_S,
             "aktiv" if Config.ENABLED else "AUS (Durchleitbetrieb)",
         ),
         flush=True,
