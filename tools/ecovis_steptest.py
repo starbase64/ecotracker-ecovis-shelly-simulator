@@ -3,7 +3,7 @@
 ECOVIS Sprungantwort-Messung
 ============================
 
-Ersetzt den Limiter voruebergehend und meldet uni-meter einen FESTEN Wert.
+Ersetzt den Proxy voruebergehend und meldet uni-meter einen FESTEN Wert.
 Protokolliert dabei, wie schnell der ECOVIS seine Ausgangsleistung verschiebt.
 Ergebnis ist die Streckenverstaerkung: Watt Leistungsaenderung pro gemeldetem
 Watt und pro Sekunde. Daraus laesst sich KP sauber berechnen.
@@ -16,14 +16,14 @@ Ablauf:
 Sicherheitsabbruch: ueberschreitet die gemessene Ausgangsleistung ABORT_W oder
 die Einspeisung ABORT_EXPORT_W, schaltet das Werkzeug sofort auf Phase 3.
 
-Vorher den Limiter stoppen, sonst ist Port 18081 belegt:
-    docker stop ecotracker-limiter
+Vorher den Proxy stoppen, sonst ist Port 18081 belegt:
+    docker stop ecotracker-proxy
 
 Start (Beispiel):
     python3 ecovis_steptest.py
 
 Danach:
-    docker start ecotracker-limiter
+    docker start ecotracker-proxy
 
 Nur Standardbibliothek.
 """
@@ -233,7 +233,7 @@ def main() -> int:
     except OSError as exc:
         print(f"[warn] CSV nicht schreibbar: {exc}", flush=True)
 
-    print("[info] Fertig. Jetzt: docker start ecotracker-limiter", flush=True)
+    print("[info] Fertig. Jetzt: docker start ecotracker-proxy", flush=True)
     return 0
 
 

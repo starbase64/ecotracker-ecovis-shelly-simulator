@@ -1,5 +1,22 @@
 # Changelog
 
+## 4.0.0
+- Das Projekt ist jetzt ausdrücklich ein gedämpfter EcoTracker–Shelly-Proxy
+  und kein Leistungsbegrenzer.
+- Experimentellen Deckel, Ausgangsschätzung, Shelly-Ausgangsmessung und alle
+  zugehörigen Optionen entfernt. Der Ansatz kann prinzipbedingt keine sichere
+  800-W-Grenze bereitstellen.
+- Hauptprogramm und Compose-Dienst heißen jetzt `ecotracker_shelly_proxy.py`
+  beziehungsweise `ecotracker-proxy`. Der alte Python-Dateiname bleibt als
+  Kompatibilitätsstarter erhalten.
+- Eindeutige Diagnosefelder für Rohwert, geglätteten Wert, Verstärkung,
+  Richtung, Datenalter und Verfügbarkeit von `agePower` ergänzt.
+- Fehlendes `agePower` wird akzeptiert, aber sichtbar markiert und einmalig
+  protokolliert.
+- Failsafe und deutliche Einspeisung umgehen das Haltefenster sofort.
+- Docker-Healthcheck und automatisierte Tests ergänzt.
+- Dokumentation trennt Nulleinspeisungsregelung und Leistungsbegrenzung klar.
+
 ## 3.5.0
 - **Daempfung statt Glaettung.** `REPORT_GAIN_UP` (0.4) und `REPORT_GAIN_DOWN`
   (0.6): es wird nur ein Bruchteil des Netzwerts gemeldet. Der gemessene

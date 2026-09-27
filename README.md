@@ -1,85 +1,80 @@
 # EcoTracker → Shelly Pro 3EM Simulator für ECO-WORTHY ECOVIS 2400
 
-Der ECOVIS 2400 (ECO-BPS2400WDZ) akzeptiert als Stromzähler nur einen Shelly 3EM
-oder Shelly Pro 3EM. Dieses Projekt stellt ihm einen solchen Zähler bereit,
-gespeist aus den Messwerten eines everHome EcoTracker.
+Der ECOVIS 2400 (ECO-BPS2400WDZ) akzeptiert als Stromzähler einen Shelly 3EM
+oder Shelly Pro 3EM. Dieses Projekt simuliert einen Shelly Pro 3EM und speist
+ihn mit den lokalen Messwerten eines everHome EcoTrackers.
 
+```text
+EcoTracker ──HTTP/JSON──▶ Dämpfungs-Proxy :18081 ──▶ uni-meter
+                                                        │
+                                             Shelly-Pro-3EM-Protokoll
+                                                        │
+                                                        ▼
+                                                   ECOVIS 2400
 ```
-EcoTracker  ──HTTP/JSON──▶  Limiter :18081  ──HTTP/JSON──▶  uni-meter
-                                                                 │
-                                                        Shelly Pro 3EM
-                                                       (HTTP 80, UDP 8888)
-                                                                 │
-                                                                 ▼
-                                                          ECOVIS 2400
+
+Getesteter Stand: Proxy 4.0.0, sdeigm/uni-meter 1.5.0 und ECO-WORTHY
+ECOVIS 2400.
+
+> **Keine 800-W-Begrenzung:** Der ECOVIS versteht den Zählerwert als
+> wiederholte Korrektur und nicht als absoluten Leistungssollwert. Dieses
+> Projekt stabilisiert die Nulleinspeisungsregelung, begrenzt aber nicht die
+> Ausgangsleistung. Im Automatikmodus kann das Gerät bis 1.600 W hochregeln.
+
+## Funktionsweise
+
+Ein echter Stromzähler meldet, was am Hausanschluss passiert. Meldet er 100 W
+Netzbezug, erhöht der ECOVIS seine Ausgangsleistung um ungefähr 100 W. Beim
+nächsten Regelzyklus verarbeitet er den dann vorhandenen Netzbezug erneut.
+
+Wegen der gemessenen Totzeit sind zwei bis drei Korrekturen gleichzeitig
+unterwegs. Der volle Netzwert führt deshalb zu einem Grenzzyklus. Der Proxy
+meldet nur einen Anteil:
+
+```text
+Bezug:       gemeldeter Wert = Netzwert × 0,4
+Einspeisung: gemeldeter Wert = Netzwert × 0,6
 ```
 
-Der Limiter sitzt zwischen EcoTracker und uni-meter. Er reicht den Netzwert
-durch, dämpft ihn und sorgt für definiertes Verhalten bei Datenausfall.
+Der ECOVIS bleibt der einzige Regler. Der Proxy berechnet weder eine eigene
+Ausgangsleistung noch einen Leistungssollwert.
 
-Getesteter Stand: Limiter 3.5.0, sdeigm/uni-meter:1.5.0, ECO-WORTHY ECOVIS 2400.
+## Gemessenes Geräteverhalten
 
----
-
-## Gemessenes Verhalten des ECOVIS
-
-Alle Werte stammen aus Messungen am eigenen Gerät, nicht aus Dokumentation.
+Alle Werte stammen aus Messungen am eigenen Gerät.
 
 | Eigenschaft | Messwert | Methode |
-|---|---|---|
-| Abfrage des Zählers | UDP-Broadcast auf Port 8888, alle 2,3–3,5 s | tcpdump |
-| Regelzyklus | ~5 s | Sprungantwort |
-| Verstärkung | 1,0 × gemeldeter Wert pro Zyklus | Sprungantwort |
-| Totzeit bis sichtbare Wirkung | ~9,5 s | Sprungantwort |
-| Verhalten bei Datenausfall | hält den letzten Zustand unbegrenzt | Ausfalltest |
-| Wiederanlauf | automatisch, ohne Neukopplung | Ausfalltest |
-| Leistungsfaktor | reine Funktion der Leistung (0,94 bei 130 W … 0,99 bei 300 W) | Mitschnitt |
-| Wirkungsgrad AC/Batterie | 74 % bei 130 W … 88 % bei 300 W | Mitschnitt |
+|---|---:|---|
+| Zählerabfrage | UDP-Broadcast Port 8888 alle 2,3–3,5 s | `tcpdump` |
+| Regelzyklus | ungefähr 5 s | Sprungantwort |
+| Verstärkung | etwa 1,0 × gemeldeter Wert je Zyklus | Sprungantwort |
+| Totzeit bis sichtbare Wirkung | ungefähr 9,5 s | Sprungantwort |
+| Verhalten bei Datenausfall | letzter Zustand wird unbegrenzt gehalten | Ausfalltest |
+| Wiederanlauf | automatisch ohne erneute Kopplung | Ausfalltest |
+| Leistungsfaktor | 0,94 bei 130 W bis 0,99 bei 300 W | Mitschnitt |
+| Wirkungsgrad AC/Batterie | 74 % bei 130 W bis 88 % bei 300 W | Mitschnitt |
 
-**Wichtig:** Der ECOVIS behandelt den gemeldeten Netzwert als *Korrektur*, nicht
-als Sollwert. Er verschiebt seine Ausgangsleistung pro Zyklus um genau diesen
-Betrag. Ein echter Shelly meldet den tatsächlichen Netzwert, wodurch sich die
-Abweichung nach jeder Korrektur selbst verkleinert — die Schleife trägt sich ab.
+Mit den Standardwerten `REPORT_GAIN_UP=0.4` und
+`REPORT_GAIN_DOWN=0.6` verschwand der zuvor gemessene Grenzzyklus von ungefähr
+±160 W bei rund 60 Sekunden Periodendauer. Im gemessenen Dauerbetrieb lag der
+Netzwert zwischen −15 und +11 W. Ein Lastsprung von 900 W war nach ungefähr
+25 Sekunden eingeschwungen.
 
----
+## Warum der Zählersimulator keine 800-W-Grenze setzen kann
 
-## Warum es keine Leistungsbegrenzung über den Zähler gibt
+Der Zählerwert ist kein Sollwert, sondern eine Korrektur. Eine Begrenzung des
+gemeldeten Werts auf beispielsweise 790 W begrenzt nur einen einzelnen Schritt.
+Bei 2.000 W Hauslast kann der ECOVIS denselben Schritt wiederholt addieren und
+weiter bis zur Geräteobergrenze steigen.
 
-Mehrere Versuche (Limiter 2.0 bis 3.3) haben versucht, über den Zählerwert eine
-Obergrenze von 800 W zu erzwingen. Das funktioniert nicht, und zwar prinzipiell:
+Auch eine mitlaufende Schätzung ist nicht zuverlässig: Setzt das Gerät einen
+Befehl nicht um, weichen Schätzung und Realität dauerhaft voneinander ab. Die
+verfügbare Cloud-Telemetrie aktualisierte sich im Test nur etwa alle 37 Sekunden
+und ist bei 9,5 Sekunden Totzeit zu langsam.
 
-* **Der Zählerwert ist kein Sollwert.** Ein Deckel bei 790 W begrenzt die
-  Schrittweite, nicht das Ergebnis. Das Gerät addiert jeden Zyklus erneut und
-  klettert trotzdem über die Grenze.
-* **Ohne Messung am Ausgang lässt sich die Ausgangsleistung nicht bestimmen.**
-  Eine mitlaufende Schätzung driftet, sobald das Gerät einen Befehl nicht
-  umsetzt — beobachtet und dokumentiert.
-* **Die Telemetrie der Cloud-Bridge ist zu langsam.** Die AC-Leistung
-  aktualisiert nur etwa alle 37 s, bei 9,5 s Totzeit unbrauchbar.
-
-Die Leistungsbegrenzung gehört deshalb dorthin, wo es einen echten Sollwert
-gibt: in den manuellen Betriebsmodus des Geräts, gesetzt über die
-[ecovis-home-assistant-bridge](https://github.com/starbase64/ecovis-home-assistant-bridge).
-Der Zählersimulator bleibt für die Nullregelung zuständig.
-
----
-
-## Dämpfung statt Glättung
-
-Wird der volle Netzwert gemeldet, korrigiert der ECOVIS jede Abweichung
-mehrfach: In der Totzeit von 9,5 s bei 5 s Regelzyklus sind stets zwei bis drei
-Befehle unterwegs. Das Ergebnis ist ein Grenzzyklus — gemessen mit einer Periode
-von rund 60 s und einer Amplitude von ±160 W.
-
-Eine EMA-Glättung verschlimmert das, weil sie Phasenverzug hinzufügt. Die
-wirksame Schraube ist die Verstärkung: Wird nur ein Bruchteil des Netzwerts
-gemeldet, klingt die Abweichung geometrisch ab.
-
-Mit `REPORT_GAIN_UP=0.4` und `REPORT_GAIN_DOWN=0.6` verschwindet der
-Grenzzyklus. Gemessen im Dauerbetrieb: Netzwert zwischen −15 und +11 W,
-Einschwingen nach einem Lastsprung von 900 W in etwa 25 s.
-
----
+Eine echte Grenze benötigt einen absoluten Leistungssollwert. Sie gehört daher
+in den manuellen Betriebsmodus beziehungsweise in eine direkte Gerätesteuerung,
+nicht in das Shelly-Zählerprotokoll.
 
 ## Installation
 
@@ -87,144 +82,131 @@ Einschwingen nach einem Lastsprung von 900 W in etwa 25 s.
 git clone https://github.com/starbase64/ecotracker-ecovis-shelly-simulator.git
 cd ecotracker-ecovis-shelly-simulator
 cp .env.example .env
-# In .env die Adresse des eigenen EcoTrackers eintragen
-# Die mitgelieferte uni-meter.conf bei Bedarf an das eigene Netz anpassen
+nano .env
 docker compose up -d
-docker compose logs -f ecotracker-limiter
+docker compose logs -f ecotracker-proxy
 ```
 
-Die erste Logzeile nennt Version und Betriebsart:
+In `.env` muss `ECOTRACKER_URL` auf die lokale EcoTracker-Schnittstelle zeigen.
+Die mitgelieferte `uni-meter.conf` verwendet den Proxy unter
+`http://127.0.0.1:18081/v1/json` und UDP-Port 8888. Beide Container laufen im
+Host-Netz, weil der ECOVIS den simulierten Shelly per UDP-Broadcast sucht.
 
+### Aktualisierung von Version 3.5
+
+Version 4.0 benennt Dienst, Container und Hauptprogramm um und entfernt die
+gescheiterte experimentelle Leistungsbegrenzung vollständig:
+
+```bash
+cd /home/maik/shelly_simulator
+cp -a docker-compose.yml docker-compose.yml.bak-3.5
+cp -a ecotracker_limiter.py ecotracker_limiter.py.bak-3.5
+
+# Neue Dateien aus dem Paket in dieses Verzeichnis kopieren, dann:
+docker compose down
+docker compose up -d
+docker compose logs --since=2m ecotracker-proxy ecotracker-shelly
+./check.sh
 ```
-[info] Limiter 3.5.0 | Deckel 760 W | Befehle in der Totzeit 3.0 | Ausgangsleistung: eigene Schaetzung | Begrenzung AUS
-```
 
-### uni-meter.conf
-
-Die Konfiguration von uni-meter gehört ins selbe Verzeichnis. Zwei Punkte sind
-entscheidend:
-
-* Eingang `generic-http` auf `http://127.0.0.1:18081/v1/json`, Feld `$.power`
-* Ausgang `shelly-pro3em` auf Port 80 und `udp-port = 8888`
-
-Der ECOVIS sucht per UDP-Broadcast, deshalb brauchen beide Container
-`network_mode: host`.
-
----
+Der alte Dateiname `ecotracker_limiter.py` bleibt als Kompatibilitätsstarter
+erhalten, wird von der neuen Compose-Datei aber nicht mehr verwendet.
 
 ## Konfiguration
 
 | Variable | Vorgabe | Bedeutung |
-|---|---|---|
-| `ECOTRACKER_URL` | `http://192.168.1.50:18080/v1/json` | Beispieladresse; in `.env` an das eigene Netz anpassen |
-| `ECOTRACKER_MAX_AGE_MS` | `3000` | Grenze für `agePower`; fehlt das Feld, wird der Wert akzeptiert |
-| `POLL_INTERVAL` | `1.0` | Abfragetakt des Limiters |
-| `LISTEN_HOST` / `LISTEN_PORT` | `127.0.0.1` / `18081` | eigener Endpunkt für uni-meter |
-| **Dämpfung** | | |
-| `REPORT_GAIN_UP` | `0.4` | Anteil des gemeldeten Werts bei Bezug |
+|---|---:|---|
+| `ECOTRACKER_URL` | `http://192.168.1.50:18080/v1/json` | lokale EcoTracker-API |
+| `ECOTRACKER_MAX_AGE_MS` | `3000` | maximales `agePower`, sofern vorhanden |
+| `POLL_INTERVAL` | `1.0` | Abfragetakt in Sekunden |
+| `LISTEN_HOST` / `LISTEN_PORT` | `127.0.0.1` / `18081` | lokaler Proxy-Endpunkt |
+| `REPORT_GAIN_UP` | `0.4` | Anteil bei Netzbezug |
 | `REPORT_GAIN_DOWN` | `0.6` | Anteil bei Einspeisung |
-| `REPORT_DEADBAND_W` | `10` | darunter wird 0 gemeldet, das Gerät hält |
-| `GRID_SMOOTH_S` | `3.0` | leichte Glättung gegen Messrauschen; Einspeisung über `FAST_EXPORT_W` geht ungeglättet durch |
-| `FAST_EXPORT_W` | `30` | ab dieser Einspeisung sofort nachführen |
-| **Ausfall** | | |
-| `STALE_S` | `5` | danach gilt der Netzwert als veraltet |
-| `STALE_HARD_S` | `15` | danach maximale Absenkung |
-| `SAFE_REDUCE_W` | `-300` | gemeldeter Wert im Ausfall |
-| `SAFE_REDUCE_HARD_W` | `-800` | gemeldeter Wert im harten Ausfall |
-| **Deckel (experimentell, siehe oben)** | | |
-| `ENABLED` | `true` | `false` = reiner Durchleitbetrieb, empfohlen |
-| `CAP_W` | `760` | Obergrenze, nur mit `INVERTER_URL` sinnvoll |
-| `IN_FLIGHT` | `3.0` | angenommene Zahl gleichzeitig unterwegs befindlicher Befehle |
-| `INVERTER_URL` | leer | Messung am Ausgang, z. B. ein Shelly; leer = Schätzung |
-| `APPLY_INTERVAL_S` | `5.0` | Regelzyklus des Geräts |
-| `RESYNC_S` / `RESYNC_W` | `60` / `25` | Abbau einer verklemmten Schätzung |
+| `REPORT_DEADBAND_W` | `10` | kleinere geglättete Abweichungen melden 0 W |
+| `REPORT_HOLD_S` | `5` | Korrekturwert für einen Gerätezyklus halten |
+| `GRID_SMOOTH_S` | `3` | kurze Glättung gegen Messrauschen |
+| `FAST_EXPORT_W` | `30` | stärkere Einspeisung sofort nachführen |
+| `MAX_CORRECTION_UP_W` | `800` | maximal gemeldeter positiver Einzelschritt; **kein Ausgangslimit** |
+| `MAX_CORRECTION_DOWN_W` | `2000` | maximaler Absenkschritt als positiver Betrag |
+| `STALE_S` | `5` | danach gilt die Quelle als veraltet |
+| `STALE_HARD_S` | `15` | danach wird der harte Failsafe gemeldet |
+| `SAFE_REDUCE_W` | `-300` | Absenksignal bei kurzem Datenausfall |
+| `SAFE_REDUCE_HARD_W` | `-800` | Absenksignal bei längerem Datenausfall |
 
-### Empfohlene Einstellung
-
-```yaml
-ENABLED: "false"
-REPORT_GAIN_UP: "0.4"
-REPORT_GAIN_DOWN: "0.6"
-REPORT_DEADBAND_W: "10"
-GRID_SMOOTH_S: "3"
-FAST_EXPORT_W: "30"
-```
-
-Schwingt es, `REPORT_GAIN_UP` senken (0,25). Ist es zu träge, vorsichtig anheben
-(0,5). `REPORT_GAIN_DOWN` nicht unter 0,5, sonst dauern Einspeisephasen nach
-einem Lastabwurf länger.
-
----
+Die Standardverstärkungen beruhen auf Messungen am Testgerät. Änderungen
+sollten mit einem Mitschnitt überprüft werden. Die Grenzen
+`MAX_CORRECTION_*` begrenzen ausschließlich einen gemeldeten Korrekturschritt.
 
 ## Diagnose
 
 ```bash
+./check.sh
+```
+
+Oder einzeln:
+
+```bash
 curl -s http://127.0.0.1:18081/v1/json | python3 -m json.tool
+curl -s http://127.0.0.1:18081/healthz | python3 -m json.tool
+curl -s 'http://127.0.0.1/rpc/EM.GetStatus?id=0' | python3 -m json.tool
 ```
 
 | Feld | Bedeutung |
 |---|---|
-| `limiterState` | `passthrough`, `capped`, `failsafe`, `failsafe_hard`, Zusatz `_hold` während eines Haltefensters |
-| `limiterGridPower` | Netzwert roh |
-| `limiterGridSmoothed` | nach Glättung |
-| `limiterReported` | was uni-meter ausliefert |
-| `limiterOutputEstimate` | geschätzte Ausgangsleistung (nur mit Deckel) |
-| `limiterEcoTrackerAgeMs` | Alter des Messwerts laut EcoTracker |
+| `proxyState` | `damped_raise`, `damped_reduce`, `deadband`, Failsafe oder `_hold` |
+| `gridPowerRaw` | unveränderter EcoTracker-Netzwert |
+| `gridPowerSmoothed` | Netzwert nach kurzer Glättung |
+| `reportedPower` | an uni-meter ausgegebener Korrekturwert |
+| `reportGain` | aktuell verwendeter Faktor |
+| `reportDirection` | erhöhen, absenken oder halten |
+| `dataHealthy` | EcoTracker-Wert ist lokal frisch |
+| `dataAgeSeconds` | Alter der letzten erfolgreichen HTTP-Abfrage |
+| `ecoTrackerAgePowerMs` | vom EcoTracker gemeldetes Alter oder `null` |
+| `ecoTrackerAgePowerAvailable` | zeigt, ob `agePower` geliefert wurde |
 
----
-
-## Werkzeuge
-
-**`tools/ecovis_steptest.py`** — Sprungantwort messen. Ersetzt den Limiter
-vorübergehend, meldet einen festen Wert und protokolliert die Reaktion. Damit
-wurden Verstärkung, Regelzyklus und Totzeit bestimmt. Abbruchschutz bei zu hoher
-Ausgangsleistung oder Einspeisung.
-
-```bash
-docker compose stop ecotracker-limiter
-python3 tools/ecovis_steptest.py
-docker compose start ecotracker-limiter
-```
-
-**`tools/mitschnitt.py`** — Netzwert, gemeldeten Wert und beliebige
-Home-Assistant-Entitäten im Sekundentakt nebeneinander protokollieren, mit
-Kreuzkorrelation am Ende. Damit wurde gezeigt, dass der Leistungsfaktor der
-Leistung folgt und nicht umgekehrt.
-
-```bash
-export HA_TOKEN="$(cat ~/.ha_token)"
-export HA_ENTITIES="leistung=sensor.ecovis_2400_ac_leistung,pf=sensor.ecovis_2400_leistungsfaktor"
-DURATION_S=300 python3 tools/mitschnitt.py
-```
-
----
+Die alten Felder `limiterVersion`, `limiterState`, `limiterGridPower`,
+`limiterGridSmoothed`, `limiterReported` und `limiterEcoTrackerAgeMs` bleiben
+vorerst als Kompatibilitätsaliase erhalten.
 
 ## Ausfallverhalten
 
 | Ausfall | Reaktion |
 |---|---|
-| EcoTracker nicht erreichbar | Limiter meldet `SAFE_REDUCE_W`, nach `STALE_HARD_S` den harten Wert — der ECOVIS fährt herunter |
-| Limiter gestoppt | uni-meter liefert den letzten Wert für die Dauer seines `forget-interval`, danach eine leere Antwort. Der ECOVIS **hält** seinen Zustand unbegrenzt |
-| uni-meter gestoppt | Der ECOVIS fragt weiter, bekommt nichts, hält. Nach dem Start koppelt er automatisch wieder |
+| EcoTracker nicht erreichbar | sofort negatives Korrektursignal; nach `STALE_HARD_S` stärkeres Signal |
+| Proxy gestoppt | uni-meter vergisst den letzten Wert nach seinem `forget-interval`; ECOVIS hält anschließend seinen Zustand |
+| uni-meter gestoppt | ECOVIS hält seinen Zustand und koppelt nach dem Neustart automatisch wieder |
 
-Der zweite und dritte Fall sind nicht durch den Limiter abgedeckt — er läuft
-dann ja selbst nicht. Wer einen harten Schutz braucht, sollte einen Schalter am
-AC-Ausgang von außerhalb dieser Kette überwachen, etwa per Automation in Home
-Assistant auf Basis der EcoTracker-Werte.
+Der Proxy kann seinen eigenen Ausfall nicht absichern. Wer eine unabhängige
+Schutzebene benötigt, muss den AC-Ausgang außerhalb dieser Software überwachen
+und gegebenenfalls abschalten.
 
----
+## Messwerkzeuge
 
-## Nicht gelöst
+`tools/ecovis_steptest.py` erzeugt definierte Sprünge und protokolliert die
+Reaktion. Das Werkzeug ersetzt den Proxy vorübergehend und besitzt Grenzwerte
+für Ausgangsleistung und Einspeisung.
 
-* Keine Leistungsbegrenzung über den Zähler (siehe oben). Im Automatikmodus geht
-  das Gerät bis 1.600 W.
-* Lasten, die schneller schalten als die Totzeit (Herdplatte mit
-  Zweipunktregelung), lassen sich nicht ausregeln. Gemessene Ausschläge bis
-  −485 W bei einem 900-W-Takt.
-* Kein Schutz gegen den Ausfall des Limiters selbst.
+`tools/mitschnitt.py` zeichnet EcoTracker, Proxy und optionale
+Home-Assistant-Entitäten gemeinsam auf. Es berechnet Kreuzkorrelationen sowie
+Mittelwert, mittlere Nullabweichung, Spitzenwerte und den Anteil innerhalb
+von ±15 W.
 
----
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m py_compile ecotracker_shelly_proxy.py ecotracker_limiter.py tools/*.py
+```
+
+## Bekannte Grenzen
+
+- Keine Begrenzung der ECOVIS-Ausgangsleistung; im Automatikmodus sind bis zu
+  1.600 W möglich.
+- Schnell taktende Lasten können wegen der gemessenen Totzeit nicht vollständig
+  ausgeregelt werden.
+- Kein Schutz gegen den Ausfall des Proxy- oder uni-meter-Containers selbst.
+- Inoffizielles Projekt ohne Verbindung zu ECO-WORTHY oder everHome.
 
 ## Lizenz
 
-MIT. Inoffiziell, ohne Gewähr, kein Bezug zu ECO-WORTHY oder everHome.
+MIT

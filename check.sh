@@ -4,8 +4,12 @@ set -eu
 printf '%s\n' '--- Containers ---'
 docker compose ps
 
-printf '\n%s\n' '--- Limiter ---'
+printf '\n%s\n' '--- EcoTracker-Shelly-Proxy ---'
 curl --fail --silent --show-error 'http://127.0.0.1:18081/v1/json' |
+  python3 -m json.tool
+
+printf '\n%s\n' '--- Proxy health ---'
+curl --fail --silent --show-error 'http://127.0.0.1:18081/healthz' |
   python3 -m json.tool
 
 printf '\n%s\n' '--- Simulated Shelly Pro 3EM ---'

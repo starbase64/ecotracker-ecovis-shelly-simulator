@@ -1,12 +1,18 @@
 services:
-  ecotracker-limiter:
+  ecotracker-proxy:
     image: python:3.13-alpine
-    container_name: ecotracker-limiter
+    container_name: ecotracker-proxy
     network_mode: host
     restart: unless-stopped
-    command: ["python3", "-u", "/app/ecotracker_limiter.py"]
+    command: ["python3", "-u", "/app/ecotracker_shelly_proxy.py"]
     volumes:
-      - ./ecotracker_limiter.py:/app/ecotracker_limiter.py:ro
+      - ./ecotracker_shelly_proxy.py:/app/ecotracker_shelly_proxy.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:18081/healthz', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
     environment:
       # --- Datenquelle ---------------------------------------------------
       ECOTRACKER_URL: "${ECOTRACKER_URL:-http://192.168.1.50:18080/v1/json}"
@@ -25,6 +31,7 @@ services:
       REPORT_DEADBAND_W: "10"
       GRID_SMOOTH_S: "3"
       FAST_EXPORT_W: "30"
+      REPORT_HOLD_S: "5"
 
       # --- Ausfallverhalten ------------------------------------------------
       STALE_S: "5"
@@ -32,16 +39,10 @@ services:
       SAFE_REDUCE_W: "-300"
       SAFE_REDUCE_HARD_W: "-800"
 
-      # --- Deckel (experimentell, siehe README) ---------------------------
-      # Ohne Messung am Ausgang nicht verlaesslich. Empfehlung: "false".
-      ENABLED: "false"
-      INVERTER_URL: ""
-      CAP_W: "760"
-      IN_FLIGHT: "3.0"
-      APPLY_INTERVAL_S: "5.0"
-      DEVICE_MAX_W: "1600"
-      RESYNC_S: "60"
-      RESYNC_W: "25"
+      # Grenzen eines einzelnen Korrektursignals. Sie begrenzen NICHT die
+      # Ausgangsleistung des ECOVIS.
+      MAX_CORRECTION_UP_W: "800"
+      MAX_CORRECTION_DOWN_W: "2000"
 
   ecotracker-shelly:
     image: sdeigm/uni-meter:1.5.0
@@ -49,6 +50,7 @@ services:
     network_mode: host
     restart: unless-stopped
     depends_on:
-      - ecotracker-limiter
+      ecotracker-proxy:
+        condition: service_healthy
     volumes:
       - ./uni-meter.conf:/etc/uni-meter.conf:ro

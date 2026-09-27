@@ -6,7 +6,7 @@ vorauslaeuft.
 
 Quellen:
   * EcoTracker   : Netzwert (direkt, unabhaengig von der Kette)
-  * Limiter      : gemeldeter Wert und Zustand
+  * Proxy        : gemeldeter Wert und Zustand
   * Home Assistant: beliebige Entitaeten (Ausgangsleistung, Leistungsfaktor)
 
 Home-Assistant-Token: Profil -> Sicherheit -> Langlebige Zugriffstoken.
@@ -40,7 +40,7 @@ def env(name: str, default: str = "") -> str:
 
 
 ECOTRACKER_URL = env("ECOTRACKER_URL", "http://192.168.1.50:18080/v1/json")
-LIMITER_URL = env("LIMITER_URL", "http://127.0.0.1:18081/v1/json")
+PROXY_URL = env("PROXY_URL", env("LIMITER_URL", "http://127.0.0.1:18081/v1/json"))
 HA_URL = env("HA_URL", "http://192.168.1.10:8123")
 HA_TOKEN = env("HA_TOKEN")
 HA_ENTITIES = env("HA_ENTITIES")          # "label=entity_id,label=entity_id"
@@ -82,10 +82,11 @@ def read_grid():
         return None
 
 
-def read_limiter():
+def read_proxy():
     try:
-        data = fetch(LIMITER_URL)
-        return float(data.get("power", 0.0)), data.get("limiterState", "-")
+        data = fetch(PROXY_URL)
+        return float(data.get("power", 0.0)), data.get(
+            "proxyState", data.get("limiterState", "-"))
     except Exception:  # noqa: BLE001
         return None, "-"
 
@@ -151,7 +152,7 @@ def main() -> int:
     while not STOP and (time.monotonic() - t0) < DURATION_S:
         stamp = time.strftime("%H:%M:%S")
         grid = read_grid()
-        reported, state = read_limiter()
+        reported, state = read_proxy()
         values = [read_entity(entity) for _, entity in ENTITIES]
 
         row = [stamp, grid, reported, state] + values
@@ -185,6 +186,23 @@ def main() -> int:
     # --- Auswertung -------------------------------------------------------
     grid_series = [r[1] for r in rows]
     reported_series = [r[2] for r in rows]
+
+    valid_grid = [value for value in grid_series if value is not None]
+    valid_reported = [value for value in reported_series if value is not None]
+    if valid_grid:
+        mean = sum(valid_grid) / len(valid_grid)
+        mean_abs = sum(abs(value) for value in valid_grid) / len(valid_grid)
+        print("\n=== Regelqualitaet ===", flush=True)
+        print(f"Messpunkte           : {len(valid_grid)}", flush=True)
+        print(f"Netzwert Mittel      : {mean:+.1f} W", flush=True)
+        print(f"Mittlere Abweichung  : {mean_abs:.1f} W", flush=True)
+        print(f"Groesster Bezug      : {max(valid_grid):.1f} W", flush=True)
+        print(f"Groesste Einspeisung : {abs(min(0.0, min(valid_grid))):.1f} W", flush=True)
+        inside = sum(abs(value) <= 15.0 for value in valid_grid)
+        print(f"Innerhalb +/-15 W    : {inside / len(valid_grid) * 100:.1f} %", flush=True)
+    if valid_reported:
+        print(f"Korrektur Min/Max    : {min(valid_reported):+.1f} / "
+              f"{max(valid_reported):+.1f} W", flush=True)
 
     print("\n=== Zusammenhaenge ===", flush=True)
     max_lag = int(min(30, len(rows) // 4))
