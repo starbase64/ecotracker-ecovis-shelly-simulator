@@ -16,33 +16,33 @@ services:
     environment:
       # --- Datenquelle ---------------------------------------------------
       ECOTRACKER_URL: "${ECOTRACKER_URL:-http://192.168.1.50:18080/v1/json}"
-      ECOTRACKER_MAX_AGE_MS: "3000"
-      POLL_INTERVAL: "1.0"
+      ECOTRACKER_MAX_AGE_MS: "${ECOTRACKER_MAX_AGE_MS:-3000}"
+      POLL_INTERVAL: "${POLL_INTERVAL:-1.0}"
 
       # --- eigener Endpunkt ----------------------------------------------
-      LISTEN_HOST: "127.0.0.1"
-      LISTEN_PORT: "18081"
+      LISTEN_HOST: "${LISTEN_HOST:-127.0.0.1}"
+      LISTEN_PORT: "${LISTEN_PORT:-18081}"
 
       # --- Daempfung ------------------------------------------------------
       # Der ECOVIS verschiebt seine Leistung pro Zyklus um den gemeldeten
       # Betrag. Der volle Netzwert fuehrt zu einem Grenzzyklus.
-      REPORT_GAIN_UP: "0.4"
-      REPORT_GAIN_DOWN: "0.6"
-      REPORT_DEADBAND_W: "10"
-      GRID_SMOOTH_S: "3"
-      FAST_EXPORT_W: "30"
-      REPORT_HOLD_S: "5"
+      REPORT_GAIN_UP: "${REPORT_GAIN_UP:-0.4}"
+      REPORT_GAIN_DOWN: "${REPORT_GAIN_DOWN:-0.6}"
+      REPORT_DEADBAND_W: "${REPORT_DEADBAND_W:-10}"
+      GRID_SMOOTH_S: "${GRID_SMOOTH_S:-3}"
+      FAST_EXPORT_W: "${FAST_EXPORT_W:-30}"
+      REPORT_HOLD_S: "${REPORT_HOLD_S:-5}"
 
       # --- Ausfallverhalten ------------------------------------------------
-      STALE_S: "5"
-      STALE_HARD_S: "15"
-      SAFE_REDUCE_W: "-300"
-      SAFE_REDUCE_HARD_W: "-800"
+      STALE_S: "${STALE_S:-5}"
+      STALE_HARD_S: "${STALE_HARD_S:-15}"
+      SAFE_REDUCE_W: "${SAFE_REDUCE_W:--300}"
+      SAFE_REDUCE_HARD_W: "${SAFE_REDUCE_HARD_W:--800}"
 
       # Grenzen eines einzelnen Korrektursignals. Sie begrenzen NICHT die
       # Ausgangsleistung des ECOVIS.
-      MAX_CORRECTION_UP_W: "800"
-      MAX_CORRECTION_DOWN_W: "2000"
+      MAX_CORRECTION_UP_W: "${MAX_CORRECTION_UP_W:-800}"
+      MAX_CORRECTION_DOWN_W: "${MAX_CORRECTION_DOWN_W:-2000}"
 
   ecotracker-shelly:
     image: sdeigm/uni-meter:1.5.0

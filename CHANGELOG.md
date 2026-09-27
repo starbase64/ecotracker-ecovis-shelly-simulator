@@ -15,6 +15,7 @@
   protokolliert.
 - Failsafe und deutliche Einspeisung umgehen das Haltefenster sofort.
 - Docker-Healthcheck und automatisierte Tests ergänzt.
+- Alle Compose-Einstellungen lassen sich jetzt wirksam über `.env` überschreiben.
 - Dokumentation trennt Nulleinspeisungsregelung und Leistungsbegrenzung klar.
 
 ## 3.5.0
