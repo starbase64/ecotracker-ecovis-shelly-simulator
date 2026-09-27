@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.log
+*.csv
 *.bak
+.ha_token
 backup-*/
 .DS_Store

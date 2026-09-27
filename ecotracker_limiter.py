@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """
-EcoTracker -> ECO-WORTHY ECOVIS Limiter (schwingungsarme Variante)
+EcoTracker -> ECO-WORTHY ECOVIS Limiter 3.0 (Spielraum-Begrenzung)
 
-Liest die Netzleistung vom EcoTracker und die tatsaechliche AC-Ausgangsleistung
-des ECOVIS von einem Shelly. Daraus wird ein gedaempfter Korrekturwert berechnet
-und im EcoTracker-JSON-Format bereitgestellt. uni-meter liest diese URL und
-simuliert daraus einen Shelly Pro 3EM, den der ECOVIS abfragt.
+Anderer Ansatz als 2.x: Es wird kein Korrekturwert mehr berechnet, sondern der
+echte Netzwert durchgereicht und nur nach oben begrenzt. Die Grenze ist der
+Spielraum bis zum Deckel, geteilt durch die Zahl der gleichzeitig unterwegs
+befindlichen Befehle:
+
+    gemeldet = min( Netzwert , (CAP_W - Ausgangsleistung) / IN_FLIGHT )
+
+Der ECOVIS verschiebt seine Leistung pro Regelzyklus um den gemeldeten Betrag
+(gemessener Faktor 1.0). Die Summe aller unterwegs befindlichen Befehle kann
+ihn damit rechnerisch nicht ueber CAP_W bringen. Unterhalb des Deckels bleibt
+die Werksregelung mit ihrer Selbstkorrektur aktiv.
+
+Negative Werte (Einspeisung) werden ungekuerzt durchgereicht - Absenken ist die
+sichere Richtung und soll so schnell wie moeglich passieren.
 
 Nur Standardbibliothek - laeuft unveraendert in python:3.13-alpine.
 """
@@ -13,24 +23,24 @@ Nur Standardbibliothek - laeuft unveraendert in python:3.13-alpine.
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
 import sys
 import threading
 import time
-import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2.0"
+VERSION = "3.5.0"
 
 
 # --------------------------------------------------------------------------
-# Konfiguration (alles per Umgebungsvariable ueberschreibbar)
+# Konfiguration
 # --------------------------------------------------------------------------
 
 def env_str(name: str, default: str) -> str:
-    return os.environ.get(name, default)
+    return os.environ.get(name) or default
 
 
 def env_float(name: str, default: float) -> float:
@@ -53,13 +63,13 @@ def env_bool(name: str, default: bool) -> bool:
 
 class Config:
     # --- Datenquellen -----------------------------------------------------
-    ECOTRACKER_URL = env_str("ECOTRACKER_URL", "http://192.168.8.248:18080/v1/json")
-    INVERTER_URL = env_str("INVERTER_URL", "http://192.168.8.198/rpc/Switch.GetStatus?id=0")
-    # Punkt-Pfad in der JSON-Antwort, z.B. "apower" (Gen2/3) oder "meters.0.power" (Gen1)
+    ECOTRACKER_URL = env_str("ECOTRACKER_URL", "http://192.168.1.50:18080/v1/json")
+    # Leer lassen = kein Shelly am Ausgang; der Limiter schaetzt dann selbst.
+    INVERTER_URL = env_str("INVERTER_URL", "")
     INVERTER_FIELD = env_str("INVERTER_FIELD", "apower")
     INVERTER_INVERT = env_bool("INVERTER_INVERT", True)
     HTTP_TIMEOUT = env_float("HTTP_TIMEOUT", 1.5)
-    ECOTRACKER_MAX_AGE_MS = env_float("ECOTRACKER_MAX_AGE_MS", 5000.0)
+    ECOTRACKER_MAX_AGE_MS = env_float("ECOTRACKER_MAX_AGE_MS", 3000.0)
 
     # --- eigener HTTP-Endpunkt fuer uni-meter -----------------------------
     LISTEN_HOST = env_str("LISTEN_HOST", "127.0.0.1")
@@ -69,41 +79,47 @@ class Config:
     POLL_INTERVAL = env_float("POLL_INTERVAL", 1.0)
     LOG_INTERVAL = env_float("LOG_INTERVAL", 5.0)
 
-    # --- Leistungsgrenzen -------------------------------------------------
-    MAX_OUTPUT_W = env_float("MAX_OUTPUT_W", 740.0)      # Sollwert-Deckel
-    HARD_LIMIT_W = env_float("HARD_LIMIT_W", 790.0)      # ab hier Notzweig
-    HARD_GAIN = env_float("HARD_GAIN", 2.0)
-    HARD_MIN_PUSH_W = env_float("HARD_MIN_PUSH_W", 30.0)
+    # --- Deckel -----------------------------------------------------------
+    CAP_W = env_float("CAP_W", 760.0)            # maximale Ausgangsleistung
+    IN_FLIGHT = env_float("IN_FLIGHT", 3.0)      # Befehle in der Totzeit
+    # --- Schaetzung der Ausgangsleistung ohne Shelly ----------------------
+    APPLY_INTERVAL_S = env_float("APPLY_INTERVAL_S", 5.0)   # Regelzyklus des ECOVIS
+    DEVICE_MAX_W = env_float("DEVICE_MAX_W", 1600.0)        # Nennleistung des Geraets
+    # Der gemeldete Wert wird einen ganzen Zyklus festgehalten, damit das
+    # Geraet genau den Wert anwendet, den der Limiter mitzaehlt.
+    FAST_EXPORT_W = env_float("FAST_EXPORT_W", 30.0)  # ab hier sofort nachfuehren
+    # Ohne Messung am Ausgang kann die Schaetzung verklemmen. Steht sie am
+    # Deckel, waehrend das Haus dauerhaft Strom bezieht, wird sie langsam
+    # abgebaut, damit sich der Limiter neu einfangen kann.
+    RESYNC_S = env_float("RESYNC_S", 60.0)
+    RESYNC_W = env_float("RESYNC_W", 25.0)
 
-    # --- Reglerparameter --------------------------------------------------
-    DEADBAND_W = env_float("DEADBAND_W", 15.0)
-    KP_UP = env_float("KP_UP", 0.40)                     # Schleifenverstaerkung Anheben
-    KP_DOWN = env_float("KP_DOWN", 0.70)                 # Schleifenverstaerkung Absenken
-    MAX_RAISE_SIGNAL_W = env_float("MAX_RAISE_SIGNAL_W", 200.0)
-    MAX_REDUCE_SIGNAL_W = env_float("MAX_REDUCE_SIGNAL_W", 800.0)
-    SETTLE_S = env_float("SETTLE_S", 3.0)                # gemessene Totzeit der Strecke
-
-    # Bei kleiner Hauslast wird die normale, stark gedaempfte Korrektur vom
-    # ECOVIS teilweise ignoriert (z.B. 6,9 W Korrektur bei 69 W Hauslast).
-    # In diesem sicheren Leistungsbereich darf der Regler den Fehler deshalb
-    # direkt melden. Nach einem grossen Lastabwurf bleibt zunaechst weiterhin
-    # der gedaempfte Absenkzweig aktiv.
-    LOW_LOAD_MAX_W = env_float("LOW_LOAD_MAX_W", 150.0)
-    LOW_LOAD_MAX_INVERTER_W = env_float("LOW_LOAD_MAX_INVERTER_W", 200.0)
-    LOW_LOAD_DEADBAND_W = env_float("LOW_LOAD_DEADBAND_W", 3.0)
-    LOW_LOAD_KP = env_float("LOW_LOAD_KP", 1.0)
-
-    # --- Glaettung --------------------------------------------------------
-    GRID_EMA_ALPHA = env_float("GRID_EMA_ALPHA", 0.6)
-    INV_EMA_ALPHA = env_float("INV_EMA_ALPHA", 0.6)
+    # --- Glaettung ------------------------------------------------------
+    # Der ECOVIS reagiert erst nach rund 10 s und dann in 5-s-Schritten.
+    # Schnellere Schwankungen kann er nicht abfangen - er jagt ihnen nur
+    # hinterher. Zeitkonstante in Sekunden, 0 = aus.
+    # Einseitig: Einspeisung ueber FAST_EXPORT_W geht ungeglaettet durch,
+    # damit die Absenkung nicht verzoegert wird.
+    GRID_SMOOTH_S = env_float("GRID_SMOOTH_S", 3.0)
+    # Daempfung: der ECOVIS setzt den gemeldeten Wert mit Faktor 1.0 um, und
+    # in der Totzeit sind mehrere Befehle unterwegs. Wird der volle Netzwert
+    # gemeldet, korrigiert er jede Abweichung mehrfach - es entsteht ein
+    # Grenzzyklus. Ein Bruchteil laesst die Abweichung geometrisch abklingen.
+    REPORT_GAIN_UP = env_float("REPORT_GAIN_UP", 0.4)     # Bezug -> hochfahren
+    REPORT_GAIN_DOWN = env_float("REPORT_GAIN_DOWN", 0.6)  # Einspeisung -> absenken
+    # Kleine Abweichungen gar nicht erst melden - das Geraet haelt dann.
+    REPORT_DEADBAND_W = env_float("REPORT_DEADBAND_W", 10.0)
+    MAX_REPORT_W = env_float("MAX_REPORT_W", 800.0)   # harte Obergrenze der Meldung
+    MIN_REPORT_W = env_float("MIN_REPORT_W", -2000.0)  # Untergrenze der Meldung
 
     # --- Ausfallverhalten -------------------------------------------------
     STALE_S = env_float("STALE_S", 5.0)
     STALE_HARD_S = env_float("STALE_HARD_S", 15.0)
-    SAFE_CONTROL_W = env_float("SAFE_CONTROL_W", -300.0)
+    SAFE_REDUCE_W = env_float("SAFE_REDUCE_W", -300.0)
+    SAFE_REDUCE_HARD_W = env_float("SAFE_REDUCE_HARD_W", -800.0)
 
     # --- Betriebsart ------------------------------------------------------
-    ENABLED = env_bool("ENABLED", True)
+    ENABLED = env_bool("ENABLED", True)          # false = Deckel aus, nur durchreichen
 
 
 # --------------------------------------------------------------------------
@@ -118,10 +134,7 @@ def dig(data, path: str):
     """Holt einen Wert ueber einen Punkt-Pfad, z.B. 'meters.0.power'."""
     current = data
     for part in path.split("."):
-        if isinstance(current, list):
-            current = current[int(part)]
-        else:
-            current = current[part]
+        current = current[int(part)] if isinstance(current, list) else current[part]
     return current
 
 
@@ -131,57 +144,8 @@ def fetch_json(url: str, timeout: float):
         return json.loads(response.read().decode("utf-8"))
 
 
-class Ema:
-    """Exponentieller Glaetter. alpha nahe 1.0 = wenig Glaettung, wenig Verzug."""
-
-    def __init__(self, alpha: float):
-        self.alpha = clamp(alpha, 0.05, 1.0)
-        self.value: float | None = None
-
-    def update(self, sample: float) -> float:
-        if self.value is None:
-            self.value = sample
-        else:
-            self.value = self.alpha * sample + (1.0 - self.alpha) * self.value
-        return self.value
-
-    def reset(self) -> None:
-        self.value = None
-
-
 # --------------------------------------------------------------------------
-# Gemeinsamer Zustand zwischen Regelschleife und HTTP-Server
-# --------------------------------------------------------------------------
-
-class State:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.payload = {
-            "power": 0.0,
-            "powerPhase1": 0.0,
-            "powerPhase2": 0.0,
-            "powerPhase3": 0.0,
-            "energyCounterIn": 0.0,
-            "energyCounterOut": 0.0,
-            "limiterState": "starting",
-        }
-
-    def publish(self, payload: dict) -> None:
-        with self.lock:
-            self.payload = payload
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            return dict(self.payload)
-
-
-STATE = State()
-SHUTDOWN = threading.Event()
-
-
-# --------------------------------------------------------------------------
-# Poller: lesen unabhaengig voneinander, damit ein haengendes Geraet
-# die Regelschleife nicht blockiert
+# Zustand
 # --------------------------------------------------------------------------
 
 class Reading:
@@ -203,35 +167,56 @@ class Reading:
         with self.lock:
             self.errors += 1
 
-    def get(self) -> tuple[float | None, float, dict, int]:
+    def get(self):
         with self.lock:
             age = time.monotonic() - self.timestamp if self.timestamp else 1e9
             return self.value, age, dict(self.extra), self.errors
 
 
+class State:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.payload = {
+            "power": 0.0, "powerPhase1": 0.0, "powerPhase2": 0.0, "powerPhase3": 0.0,
+            "energyCounterIn": 0.0, "energyCounterOut": 0.0,
+            "limiterVersion": VERSION, "limiterState": "starting",
+        }
+
+    def publish(self, payload: dict) -> None:
+        with self.lock:
+            self.payload = payload
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return dict(self.payload)
+
+
 GRID = Reading()
 INVERTER = Reading()
+STATE = State()
+SHUTDOWN = threading.Event()
 
+
+# --------------------------------------------------------------------------
+# Poller
+# --------------------------------------------------------------------------
 
 def poll_grid() -> None:
     while not SHUTDOWN.is_set():
         try:
             data = fetch_json(Config.ECOTRACKER_URL, Config.HTTP_TIMEOUT)
-            if "agePower" not in data:
-                raise RuntimeError("EcoTracker-Antwort enthaelt kein agePower-Feld")
-            age_power = float(data["agePower"])
-            if age_power < 0 or age_power > Config.ECOTRACKER_MAX_AGE_MS:
+            # Der EcoTracker liefert agePower zeitweise nicht mit. Das ist kein
+            # Grund fuer einen Ausfall - der Wert selbst ist ja da.
+            age_power = float(data.get("agePower") or 0.0)
+            if age_power > Config.ECOTRACKER_MAX_AGE_MS:
                 raise RuntimeError(
                     "EcoTracker-Leistungswert ist {:.0f} ms alt (Grenze {:.0f} ms)".format(
-                        age_power, Config.ECOTRACKER_MAX_AGE_MS
-                    )
-                )
-            extra = {
+                        age_power, Config.ECOTRACKER_MAX_AGE_MS))
+            GRID.set(float(data["power"]), {
                 "energyCounterIn": float(data.get("energyCounterIn", 0.0) or 0.0),
                 "energyCounterOut": float(data.get("energyCounterOut", 0.0) or 0.0),
                 "agePower": age_power,
-            }
-            GRID.set(float(data["power"]), extra)
+            })
         except Exception as exc:  # noqa: BLE001
             GRID.fail()
             _, _, _, errors = GRID.get()
@@ -241,14 +226,15 @@ def poll_grid() -> None:
 
 
 def poll_inverter() -> None:
+    if not Config.INVERTER_URL:
+        return
     while not SHUTDOWN.is_set():
         try:
             data = fetch_json(Config.INVERTER_URL, Config.HTTP_TIMEOUT)
             value = float(dig(data, Config.INVERTER_FIELD))
             if Config.INVERTER_INVERT:
                 value = -value
-            # Vorzeichen nach optionaler Invertierung:
-            # positiv = ECOVIS speist ins Haus, negativ = ECOVIS bezieht AC.
+            # positiv = ECOVIS speist ins Haus, negativ = ECOVIS bezieht AC
             INVERTER.set(value)
         except Exception as exc:  # noqa: BLE001
             INVERTER.fail()
@@ -259,158 +245,167 @@ def poll_inverter() -> None:
 
 
 # --------------------------------------------------------------------------
-# Regelschleife
+# Kern
 # --------------------------------------------------------------------------
 
-class Controller:
+class OutputEstimate:
+    """Schaetzt die Ausgangsleistung des ECOVIS ohne Messung am Ausgang.
+
+    Grundlage ist das gemessene Verhalten: Das Geraet verschiebt seine Leistung
+    pro Regelzyklus um genau den gemeldeten Betrag (Faktor 1.0). Der Limiter
+    weiss, was er gemeldet hat, und rechnet mit.
+
+    Zusaetzliche Sicherung ohne jede Messung am Ausgang: Wird eingespeist,
+    liefert der ECOVIS mindestens diesen Betrag. Die Einspeisung ist damit eine
+    Untergrenze - und Unterschaetzung ist die gefaehrliche Richtung.
+    """
+
     def __init__(self):
-        self.grid_ema = Ema(Config.GRID_EMA_ALPHA)
-        self.inv_ema = Ema(Config.INV_EMA_ALPHA)
+        self.value = 0.0
+        self.last_apply = time.monotonic()
+
+    def bleed(self, amount: float) -> None:
+        """Schaetzung langsam abbauen, wenn sie offensichtlich verklemmt ist."""
+        self.value = clamp(self.value - amount, 0.0, Config.DEVICE_MAX_W)
+
+    def apply(self, value: float) -> None:
+        """Ein Zyklus ist vorbei: das Geraet hat diesen Wert umgesetzt."""
+        self.value = clamp(self.value + value, 0.0, Config.DEVICE_MAX_W)
+
+    def correct(self, grid: float | None, measured: float | None) -> float:
+        # Einspeisung als Untergrenze
+        if grid is not None and grid < 0:
+            self.value = max(self.value, -grid)
+        # echte Messung, falls vorhanden, hat Vorrang
+        if measured is not None:
+            self.value = max(measured, 0.0)
+        self.value = clamp(self.value, 0.0, Config.DEVICE_MAX_W)
+        return self.value
+
+
+class Limiter:
+    def __init__(self):
         self.last_log = 0.0
-        self.overshoot_hits = 0
-        self.was_failsafe = True
+        self.estimate = OutputEstimate()
+        self.held = 0.0
+        self.held_since = 0.0
+        self.stuck_since = None
+        self.smooth = None
+        self.last_smooth = None
 
     def step(self) -> dict:
-        grid_raw, grid_age, grid_extra, _ = GRID.get()
-        inv_flow_raw, inv_age, _, _ = INVERTER.get()
+        grid, grid_age, grid_extra, _ = GRID.get()
+        inv, inv_age, _, _ = INVERTER.get()
+        now = time.monotonic()
 
-        grid_ok = grid_raw is not None and grid_age < Config.STALE_S
-        inv_ok = inv_flow_raw is not None and inv_age < Config.STALE_S
-        worst_age = max(grid_age, inv_age)
-
+        grid_ok = grid is not None and grid_age < Config.STALE_S
+        inv_ok = inv is not None and inv_age < Config.STALE_S
         counters = {
             "energyCounterIn": grid_extra.get("energyCounterIn", 0.0),
             "energyCounterOut": grid_extra.get("energyCounterOut", 0.0),
             "agePower": grid_extra.get("agePower"),
         }
 
-        # --- Ausfall: Wechselrichter herunterfahren lassen -----------------
-        if not grid_ok or not inv_ok:
-            self.was_failsafe = True
-            if worst_age > Config.STALE_HARD_S:
-                control = -Config.MAX_REDUCE_SIGNAL_W
-                state = "failsafe_hard"
-            else:
-                control = Config.SAFE_CONTROL_W
-                state = "failsafe"
-            return self._payload(control, state, counters,
-                                 grid=grid_raw,
-                                 inverter=None if inv_flow_raw is None else max(0.0, inv_flow_raw),
-                                 inverter_flow=inv_flow_raw,
-                                 house=None, target=None, age=worst_age)
+        headroom = None
+        measured = inv if (Config.INVERTER_URL and inv_ok) else None
+        output = self.estimate.value
+        grid_raw = grid
+        if grid_ok:
+            grid = self.smoothed(grid, now)
 
-        # Nach einem Messausfall nicht mit alten geglaetteten Werten
-        # weiterregeln. Der erste gueltige Messsatz bildet den Neustartpunkt.
-        if self.was_failsafe:
-            self.grid_ema.reset()
-            self.inv_ema.reset()
-            self.was_failsafe = False
-
-        grid_f = self.grid_ema.update(grid_raw)
-        inv_flow_f = self.inv_ema.update(inv_flow_raw)
-        inv_raw = max(0.0, inv_flow_raw)
-        inv_f = max(0.0, inv_flow_f)
-        # Der signierte AC-Fluss gehoert in die Hauslastbilanz. Dadurch wird
-        # Bezug des ECOVIS nicht faelschlich als zusaetzliche Hauslast gewertet.
-        house = grid_f + inv_flow_f
-        target = clamp(house, 0.0, Config.MAX_OUTPUT_W)
-
-        # --- Durchleitbetrieb ohne Begrenzung -----------------------------
-        if not Config.ENABLED:
-            return self._payload(grid_raw, "passthrough", counters,
-                                 grid=grid_raw, inverter=inv_raw,
-                                 inverter_flow=inv_flow_raw,
-                                 house=house, target=None, age=worst_age)
-
-        # --- Notzweig: Ausgangsleistung zu hoch ---------------------------
-        # Umgeht Daempfung und Totband. Nutzt den ungeglaetteten Messwert,
-        # damit er so frueh wie moeglich greift.
-        if inv_raw > Config.HARD_LIMIT_W:
-            ticks = max(1.0, Config.SETTLE_S / max(0.1, Config.POLL_INTERVAL))
-            push = (inv_raw - Config.MAX_OUTPUT_W) * Config.HARD_GAIN / (ticks + 1.0)
-            control = -min(max(push, Config.HARD_MIN_PUSH_W),
-                           Config.MAX_REDUCE_SIGNAL_W)
-            self.overshoot_hits += 1
-            if self.overshoot_hits in (10, 50) or self.overshoot_hits % 200 == 0:
-                print(
-                    "[warn] Notzweig schon {}x aktiv - SETTLE_S ({:.1f}s) ist "
-                    "vermutlich kleiner als die echte Totzeit. Siehe README, "
-                    "Abschnitt 'Einmessen'.".format(
-                        self.overshoot_hits, Config.SETTLE_S),
-                    flush=True,
-                )
-            return self._payload(control, "overshoot", counters,
-                                 grid=grid_raw, inverter=inv_raw,
-                                 inverter_flow=inv_flow_raw,
-                                 house=house, target=target, age=worst_age)
-
-        # --- Regelkern -----------------------------------------------------
-        # Der ECOVIS wirkt wie ein Integrator: er verschiebt seine Leistung
-        # solange, wie ein Wert ungleich Null gemeldet wird, und waehrend der
-        # Totzeit summiert er mehrere Meldungen auf. Eine Korrektur wird
-        # deshalb ueber das ganze Totzeitfenster verteilt: KP_UP bzw. KP_DOWN
-        # sind der Anteil der Differenz, der sich ueber SETTLE_S Sekunden
-        # insgesamt summiert. Werte unter 1.0 sind Pflicht, sonst schwingt es.
-        ticks = max(1.0, Config.SETTLE_S / max(0.1, Config.POLL_INTERVAL))
-        error = clamp(house, 0.0, Config.MAX_OUTPUT_W) - inv_f
-
-        low_load = (
-            target <= Config.LOW_LOAD_MAX_W
-            and inv_f <= Config.LOW_LOAD_MAX_INVERTER_W
-        )
-
-        # Unterhalb LOW_LOAD_MAX_W wird genau der noch fehlende Betrag
-        # gemeldet. Das startet den ECOVIS auch bei kleinen Lasten, bei denen
-        # die normale Daempfung nur ein einstelliger und offenbar wirkungsloser
-        # Messwert waere. Der Zweig ist auf kleine Ziel- und Istleistungen
-        # begrenzt; ein grosser Lastabwurf wird weiterhin sanft abgefangen.
-        if low_load and abs(error) < Config.LOW_LOAD_DEADBAND_W:
-            control = 0.0
-            state = "hold_low"
-        elif low_load:
-            control = error * Config.LOW_LOAD_KP
-            state = "raise_low" if error > 0 else "reduce_low"
-        elif abs(error) < Config.DEADBAND_W:
-            control = 0.0
-            state = "hold"
-        elif error > 0:
-            control = error * (Config.KP_UP / (ticks + 1.0))
-            state = "ceiling" if house > Config.MAX_OUTPUT_W else "raise"
+        if not grid_ok:
+            # Netzwert fehlt: herunterregeln. Die Schaetzung laeuft mit, sonst
+            # steht sie nach dem Ausfall auf einem Wert, den es nicht mehr gibt.
+            fresh = (Config.SAFE_REDUCE_HARD_W if grid_age > Config.STALE_HARD_S
+                     else Config.SAFE_REDUCE_W)
+            state = "failsafe_hard" if grid_age > Config.STALE_HARD_S else "failsafe"
+        elif not Config.ENABLED:
+            fresh, state = grid, "passthrough"
+        elif Config.INVERTER_URL and not inv_ok:
+            fresh, state = min(grid, 0.0), "hold_no_inverter"
         else:
-            control = error * (Config.KP_DOWN / (ticks + 1.0))
-            state = "reduce"
+            output = self.estimate.correct(grid, measured)
+            headroom = Config.CAP_W - output
+            allowed = headroom / max(1.0, Config.IN_FLIGHT)
+            if grid > allowed:
+                fresh, state = allowed, "capped"
+            else:
+                fresh, state = grid, "passthrough"
 
-        control = clamp(control,
-                        -Config.MAX_REDUCE_SIGNAL_W,
-                        Config.MAX_RAISE_SIGNAL_W)
+        if state.startswith(("passthrough", "capped")):
+            gain = Config.REPORT_GAIN_UP if fresh > 0 else Config.REPORT_GAIN_DOWN
+            fresh *= gain
+            if abs(fresh) < Config.REPORT_DEADBAND_W:
+                fresh = 0.0
+        fresh = clamp(fresh, Config.MIN_REPORT_W, Config.MAX_REPORT_W)
 
-        return self._payload(control, state, counters,
-                             grid=grid_raw, inverter=inv_raw,
-                             inverter_flow=inv_flow_raw,
-                             house=house, target=target, age=worst_age)
+        # --- Wert einen ganzen Zyklus festhalten --------------------------
+        # Nur so wendet das Geraet genau den Wert an, den der Limiter mitzaehlt.
+        due = (now - self.held_since) >= Config.APPLY_INTERVAL_S
+        urgent = grid_ok and grid < -Config.FAST_EXPORT_W and fresh < self.held
+        if due or urgent:
+            self.estimate.apply(self.held)
+            self.held = fresh
+            self.held_since = now
+        elif state in ("capped", "passthrough"):
+            state += "_hold"
+        reported = self.held
+
+        # --- Verklemmung aufloesen ----------------------------------------
+        if headroom is not None and headroom <= 1.0 and grid_ok and grid > 0:
+            if self.stuck_since is None:
+                self.stuck_since = now
+            elif now - self.stuck_since >= Config.RESYNC_S:
+                self.estimate.bleed(Config.RESYNC_W)
+                self.stuck_since = now
+                print("[info] Schaetzung steht am Deckel, Haus bezieht weiter - "
+                      "baue {:.0f} W ab (jetzt {:.0f} W)".format(
+                          Config.RESYNC_W, self.estimate.value), flush=True)
+        else:
+            self.stuck_since = None
+
+        payload = self._payload(reported, state, counters, grid_raw, inv, headroom,
+                                max(grid_age, inv_age if Config.INVERTER_URL else grid_age))
+        payload["limiterOutputEstimate"] = round(self.estimate.value, 1)
+        payload["limiterOutputSource"] = "shelly" if measured is not None else "schaetzung"
+        payload["limiterGridSmoothed"] = None if not grid_ok else round(grid, 1)
+        return payload
+
+    def smoothed(self, value: float, now: float) -> float:
+        """Traege Glaettung in Bezugsrichtung, sofortiger Durchgriff bei
+        nennenswerter Einspeisung."""
+        if Config.GRID_SMOOTH_S <= 0:
+            return value
+        if self.smooth is None or self.last_smooth is None:
+            self.smooth, self.last_smooth = value, now
+            return value
+        if value < -Config.FAST_EXPORT_W:
+            # Einspeisung: ungeglaettet durchreichen, Glaettung nachziehen
+            self.smooth, self.last_smooth = value, now
+            return value
+        dt = max(0.0, now - self.last_smooth)
+        alpha = 1.0 - math.exp(-dt / Config.GRID_SMOOTH_S) if dt > 0 else 0.0
+        self.smooth += alpha * (value - self.smooth)
+        self.last_smooth = now
+        return self.smooth
 
     @staticmethod
-    def _payload(control: float, state: str, counters: dict,
-                 grid, inverter, inverter_flow, house, target, age: float) -> dict:
-        control = round(float(control), 1)
-        third = round(control / 3.0, 2)
+    def _payload(reported: float, state: str, counters: dict,
+                 grid, inv, headroom, age: float) -> dict:
+        reported = round(float(reported), 1)
+        third = round(reported / 3.0, 2)
         return {
-            # Felder, die uni-meter liest
-            "power": control,
-            "powerPhase1": third,
-            "powerPhase2": third,
-            "powerPhase3": third,
+            "power": reported,
+            "powerPhase1": third, "powerPhase2": third, "powerPhase3": third,
             "energyCounterIn": counters["energyCounterIn"],
             "energyCounterOut": counters["energyCounterOut"],
-            # Diagnose
             "limiterVersion": VERSION,
             "limiterState": state,
             "limiterGridPower": None if grid is None else round(grid, 1),
-            "limiterInverterPower": None if inverter is None else round(inverter, 1),
-            "limiterInverterFlow": None if inverter_flow is None else round(inverter_flow, 1),
-            "limiterHouseLoad": None if house is None else round(house, 1),
-            "limiterTargetPower": None if target is None else round(target, 1),
-            "limiterControlPower": control,
+            "limiterInverterPower": None if inv is None else round(inv, 1),
+            "limiterHeadroom": None if headroom is None else round(headroom, 1),
+            "limiterReported": reported,
+            "limiterCap": Config.CAP_W,
             "limiterDataAge": round(age, 2),
             "limiterEcoTrackerAgeMs": counters.get("agePower"),
         }
@@ -424,27 +419,20 @@ class Controller:
         def fmt(value):
             return "   --  " if value is None else f"{value:7.1f}"
 
-        print(
-            "Netz={} | ECOVIS={} | Haus={} | Ziel={} | Korrektur={} | {}".format(
-                fmt(payload["limiterGridPower"]),
-                fmt(payload["limiterInverterPower"]),
-                fmt(payload["limiterHouseLoad"]),
-                fmt(payload["limiterTargetPower"]),
-                fmt(payload["limiterControlPower"]),
-                payload["limiterState"],
-            ),
-            flush=True,
-        )
+        print("Netz={} | ECOVIS={} | Spielraum={} | gemeldet={} | {}".format(
+            fmt(payload["limiterGridPower"]),
+            fmt(payload.get("limiterOutputEstimate")),
+            fmt(payload["limiterHeadroom"]), fmt(payload["limiterReported"]),
+            payload["limiterState"]), flush=True)
 
 
 def control_loop() -> None:
-    controller = Controller()
+    limiter = Limiter()
     next_tick = time.monotonic()
     while not SHUTDOWN.is_set():
-        payload = controller.step()
+        payload = limiter.step()
         STATE.publish(payload)
-        controller.maybe_log(payload)
-
+        limiter.maybe_log(payload)
         next_tick += Config.POLL_INTERVAL
         sleep_for = next_tick - time.monotonic()
         if sleep_for < 0:
@@ -462,30 +450,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0].rstrip("/")
-        if path in ("", "/v1/json", "/json"):
-            body = json.dumps(STATE.snapshot()).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(body)
-        else:
-            self.send_error(404)
+        if path not in ("", "/v1/json", "/json"):
+            return self.send_error(404)
+        body = json.dumps(STATE.snapshot()).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
-    def log_message(self, *args) -> None:  # Zugriffe nicht mitloggen
+    def log_message(self, *args) -> None:
         return
-
-
-def serve() -> None:
-    server = ThreadingHTTPServer((Config.LISTEN_HOST, Config.LISTEN_PORT), Handler)
-    server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(
-        f"[info] Limiter laeuft auf http://{Config.LISTEN_HOST}:{Config.LISTEN_PORT}/v1/json",
-        flush=True,
-    )
-    return server
 
 
 def main() -> int:
@@ -496,17 +472,18 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
 
-    print(
-        "[info] Limiter {} | Ziel {:.0f} W | Notzweig ab {:.0f} W | KP_UP={:.2f} KP_DOWN={:.2f} "
-        "| Niedriglast direkt bis {:.0f} W | Wartepause {:.1f}s | Begrenzung {}".format(
-            VERSION, Config.MAX_OUTPUT_W, Config.HARD_LIMIT_W, Config.KP_UP,
-            Config.KP_DOWN, Config.LOW_LOAD_MAX_W, Config.SETTLE_S,
-            "aktiv" if Config.ENABLED else "AUS (Durchleitbetrieb)",
-        ),
-        flush=True,
-    )
+    print("[info] Limiter {} | Deckel {:.0f} W | Befehle in der Totzeit {:.1f} | "
+          "Ausgangsleistung: {} | Begrenzung {}".format(
+              VERSION, Config.CAP_W, Config.IN_FLIGHT,
+              f"Shelly {Config.INVERTER_URL}" if Config.INVERTER_URL else "eigene Schaetzung",
+              "aktiv" if Config.ENABLED else "AUS"), flush=True)
 
-    serve()
+    server = ThreadingHTTPServer((Config.LISTEN_HOST, Config.LISTEN_PORT), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"[info] Limiter laeuft auf http://{Config.LISTEN_HOST}:{Config.LISTEN_PORT}/v1/json",
+          flush=True)
+
     threading.Thread(target=poll_grid, daemon=True).start()
     threading.Thread(target=poll_inverter, daemon=True).start()
     control_loop()

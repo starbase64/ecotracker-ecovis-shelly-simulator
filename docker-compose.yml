@@ -8,35 +8,40 @@ services:
     volumes:
       - ./ecotracker_limiter.py:/app/ecotracker_limiter.py:ro
     environment:
-      # Data sources (set these in .env)
-      ECOTRACKER_URL: "${ECOTRACKER_URL:?Set ECOTRACKER_URL in .env}"
-      INVERTER_URL: "${INVERTER_URL:?Set INVERTER_URL in .env}"
-      INVERTER_FIELD: "${INVERTER_FIELD:-apower}"
-      INVERTER_INVERT: "${INVERTER_INVERT:-true}"
-      ECOTRACKER_MAX_AGE_MS: "${ECOTRACKER_MAX_AGE_MS:-5000}"
+      # --- Datenquelle ---------------------------------------------------
+      ECOTRACKER_URL: "${ECOTRACKER_URL:-http://192.168.1.50:18080/v1/json}"
+      ECOTRACKER_MAX_AGE_MS: "3000"
+      POLL_INTERVAL: "1.0"
 
-      # Local endpoint consumed by uni-meter
+      # --- eigener Endpunkt ----------------------------------------------
       LISTEN_HOST: "127.0.0.1"
       LISTEN_PORT: "18081"
 
-      # Output limits
-      MAX_OUTPUT_W: "${MAX_OUTPUT_W:-740}"
-      HARD_LIMIT_W: "${HARD_LIMIT_W:-790}"
+      # --- Daempfung ------------------------------------------------------
+      # Der ECOVIS verschiebt seine Leistung pro Zyklus um den gemeldeten
+      # Betrag. Der volle Netzwert fuehrt zu einem Grenzzyklus.
+      REPORT_GAIN_UP: "0.4"
+      REPORT_GAIN_DOWN: "0.6"
+      REPORT_DEADBAND_W: "10"
+      GRID_SMOOTH_S: "3"
+      FAST_EXPORT_W: "30"
 
-      # Controller tuning
-      KP_UP: "${KP_UP:-0.40}"
-      KP_DOWN: "${KP_DOWN:-0.70}"
-      MAX_RAISE_SIGNAL_W: "${MAX_RAISE_SIGNAL_W:-200}"
-      MAX_REDUCE_SIGNAL_W: "${MAX_REDUCE_SIGNAL_W:-800}"
-      SETTLE_S: "${SETTLE_S:-3.0}"
-      DEADBAND_W: "${DEADBAND_W:-15}"
-      POLL_INTERVAL: "${POLL_INTERVAL:-1.0}"
+      # --- Ausfallverhalten ------------------------------------------------
+      STALE_S: "5"
+      STALE_HARD_S: "15"
+      SAFE_REDUCE_W: "-300"
+      SAFE_REDUCE_HARD_W: "-800"
 
-      # Failsafe
-      ENABLED: "${ENABLED:-true}"
-      STALE_S: "${STALE_S:-5}"
-      STALE_HARD_S: "${STALE_HARD_S:-15}"
-      SAFE_CONTROL_W: "${SAFE_CONTROL_W:--300}"
+      # --- Deckel (experimentell, siehe README) ---------------------------
+      # Ohne Messung am Ausgang nicht verlaesslich. Empfehlung: "false".
+      ENABLED: "false"
+      INVERTER_URL: ""
+      CAP_W: "760"
+      IN_FLIGHT: "3.0"
+      APPLY_INTERVAL_S: "5.0"
+      DEVICE_MAX_W: "1600"
+      RESYNC_S: "60"
+      RESYNC_W: "25"
 
   ecotracker-shelly:
     image: sdeigm/uni-meter:1.5.0
